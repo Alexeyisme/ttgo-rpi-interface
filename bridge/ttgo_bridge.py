@@ -53,7 +53,7 @@ MODE_TYPES = ["stats", "spotify", "weather", "image"]
 
 
 class TTGOBridge:
-    def __init__(self, serial_port: str = "/dev/ttyACM0", baud: int = 115200):
+    def __init__(self, serial_port: str = "/dev/ttyACM0", baud: int = 2000000):
         self._current_mode = 0
         self._running      = False
 
