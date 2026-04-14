@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 # flash_and_restart.sh — Build, upload, restart bridge, tail logs.
 # One command for a full TTGO development cycle.
-#
-# Usage:
-#   ./flash_and_restart.sh           # full cycle: build + upload + restart + logs
-#   ./flash_and_restart.sh --build   # build only (no upload/restart)
-#   ./flash_and_restart.sh --skip-build  # upload last build + restart
-#   ./flash_and_restart.sh --logs N  # tail logs for N seconds (default: 10)
 set -euo pipefail
 
 PROJECT_DIR="/home/homunculus/.hermes/hermes-agent/ttgo-display"
@@ -43,9 +37,9 @@ elapsed() {
     printf "%dm%02ds" $((s/60)) $((s%60))
 }
 
-# ── Pre-flight checks ────────────────────────────────────────────────────────
-[[ -f "$PIO" ]]               || fail "PlatformIO not found at $PIO"
-[[ -d "$PROJECT_DIR/src" ]]   || fail "Project dir missing: $PROJECT_DIR"
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+[[ -f "$PIO" ]] || fail "PlatformIO not found at $PIO"
+[[ -d "$PROJECT_DIR/firmware" ]] || fail "Firmware dir missing: $PROJECT_DIR/firmware"
 
 # ── Step 1: Stop bridge (releases serial port) ───────────────────────────────
 if ! $BUILD_ONLY; then
@@ -75,7 +69,6 @@ fi
 
 # ── Step 3: Upload ────────────────────────────────────────────────────────────
 [[ -e "$SERIAL_PORT" ]] || fail "Serial port $SERIAL_PORT not found"
-
 log "Uploading firmware to $SERIAL_PORT..."
 t0=$SECONDS
 if "$PIO" run -d "$PROJECT_DIR" -t upload 2>&1; then
@@ -84,15 +77,17 @@ else
     fail "Upload failed after $(elapsed $((SECONDS - t0)))"
 fi
 
-# ── Step 4: Wait for ESP32 reboot ────────────────────────────────────────────
+# ── Step 4: Wait for ESP32 reboot ─────────────────────────────────────────────
 log "Waiting 3s for ESP32 to boot..."
 sleep 3
 ok "ESP32 should be ready"
 
-# ── Step 5: Restart bridge ────────────────────────────────────────────────────
-log "Restarting $SERVICE..."
-sudo systemctl restart "$SERVICE"
-sleep 1
+# ── Step 5: Restart bridge ─────────────────────────────────────────────────────
+if ! systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    log "Restarting $SERVICE..."
+    sudo systemctl start "$SERVICE" || true
+    sleep 1
+fi
 
 if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     ok "Bridge is running"
@@ -100,9 +95,11 @@ else
     fail "Bridge failed to start — check: journalctl -u $SERVICE -n 30"
 fi
 
-# ── Step 6: Tail logs ────────────────────────────────────────────────────────
+# ── Step 6: Tail logs ───────────────────────────────────────────────────────────
 log "Tailing bridge logs for ${LOG_SECONDS}s (Ctrl+C to stop)..."
 echo "─────────────────────────────────────────────────────────────"
+
 timeout "${LOG_SECONDS}" journalctl -u "$SERVICE" -f --no-pager --output=short-iso 2>/dev/null || true
+
 echo "─────────────────────────────────────────────────────────────"
 ok "Done! Full cycle complete."
