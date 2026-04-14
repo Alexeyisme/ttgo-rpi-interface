@@ -20,9 +20,11 @@ Quick start (Raspberry Pi)
 
 Quick start (ESP32 firmware)
 - Install PlatformIO
-- Build/upload from repository root:
-    pio run
-    pio run -t upload
+- From repository root (TTGO connected as /dev/ttyACM0):
+    pio run -e lilygo-t-display
+    pio run -e lilygo-t-display -t upload
+
+Note: this repo keeps firmware sources in ./firmware, but PlatformIO expects ./src by default; a symlink ./src -> ./firmware is used for local builds.
 
 Serial protocol
 - Documented in docs/serial-protocol.md
