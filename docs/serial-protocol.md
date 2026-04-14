@@ -1,7 +1,7 @@
 Serial protocol (newline-delimited JSON)
 
 Transport
-- Baud: 115200
+- Baud: 460800
 - Framing: one JSON object per line, terminated by '\n'
 
 TTGO → Raspberry Pi (events)

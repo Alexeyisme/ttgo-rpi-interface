@@ -87,18 +87,28 @@ class SerialTransport:
                     continue
 
             try:
+                # Read one line (newline-delimited JSON). Note: pyserial readline()
+                # has shown sporadic TypeError in some CI/pty environments.
+                # We catch TypeError below to keep the read thread alive.
                 line = self._ser.readline()
                 if not line:
                     continue
+
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
+
                 try:
                     obj = json.loads(text)
                     if self._on_event and isinstance(obj, dict):
                         self._on_event(obj)
                 except json.JSONDecodeError:
                     logger.debug("Serial bad JSON: %r", text)
+
+            except TypeError as e:
+                logger.debug("Serial readline TypeError (ignored): %s", e)
+                # Keep running; next read should recover.
+                continue
 
             except serial.SerialException as e:
                 logger.warning("Serial read error: %s — reconnecting", e)

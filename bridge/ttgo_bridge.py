@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-ttgo_bridge.py — Main daemon for TTGO T-Display satellite.
+"""ttgo_bridge.py — Main daemon for TTGO T-Display satellite.
 
 Coordinates:
   - SerialTransport: reads button/PTT events, sends display data
@@ -14,8 +13,11 @@ Mode order must match MODE_* constants in firmware config.h:
   3: image
 
 Usage:
-    python3 ttgo_bridge.py
-    python3 ttgo_bridge.py --debug
+  python3 ttgo_bridge.py
+  python3 ttgo_bridge.py --debug
+
+  # Optional dev override for env vars:
+  python3 ttgo_bridge.py --env-file ../.env
 """
 
 import argparse
@@ -26,30 +28,33 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any, Optional
 
 # Ensure we can import sibling modules regardless of cwd
 sys.path.insert(0, str(Path(__file__).parent))
 
 from serial_transport import SerialTransport
-from data_collectors  import StatsCollector, SpotifyCollector, WeatherCollector, WebcamCollector
-from voice_handler    import VoiceHandler
+from data_collectors import StatsCollector, SpotifyCollector, WeatherCollector, WebcamCollector
+# NOTE: VoiceHandler (and its dependencies like requests/ffmpeg/ALSA)
+# are imported lazily so the bridge can be unit-tested without those
+# external runtime deps.
+
 
 logger = logging.getLogger(__name__)
 
 # ── Push intervals per mode (seconds) ────────────────────────────────────────
 PUSH_INTERVAL = {
-    "stats":   5,
+    "stats": 5,
     "spotify": 5,
     "weather": 10,
-
     # Image payload is heavy and we ONLY want to capture/send it when
     # TTGO enters image mode (see _on_serial_event -> mode_changed).
-    # So we keep the entry here for completeness but periodic pushing is disabled below.
-    "image":   10**9,
+    # So periodic pushing is effectively disabled.
+    "image": 10**9,
 }
 
-# Heartbeat interval — send a tiny keepalive when the mode's push interval
-# exceeds the firmware's stale-data watchdog (15 s).
+# Heartbeat interval — send a tiny keepalive so firmware freshness watchdog
+# doesn't trip when a mode's payload is infrequent.
 HEARTBEAT_INTERVAL = 10  # seconds
 
 # Mode index → type string (must match firmware config.h MODE_* order)
@@ -57,38 +62,77 @@ MODE_TYPES = ["stats", "spotify", "weather", "image"]
 
 
 class TTGOBridge:
-    def __init__(self, serial_port: str = "/dev/ttyACM0", baud: int = 460800):
+    def __init__(
+        self,
+        serial_port: str = "/dev/ttyACM0",
+        baud: int = 460800,
+        collectors: Optional[dict[str, Any]] = None,
+        voice: Any = None,
+        transport: Optional[SerialTransport] = None,
+        enable_periodic_push: bool = True,
+        enable_heartbeat: bool = True,
+        heartbeat_interval: float = HEARTBEAT_INTERVAL,
+        mode_switch_delay: float = 0.3,
+    ):
         self._current_mode = 0
-        self._running      = False
+        self._running = False
+
+        self._enable_periodic_push = enable_periodic_push
+        self._enable_heartbeat = enable_heartbeat
+        self._heartbeat_interval = float(heartbeat_interval)
+        self._mode_switch_delay = float(mode_switch_delay)
 
         # Data collectors keyed by mode type
-        self._collectors = {
-            "stats":   StatsCollector(),
+        self._collectors = collectors or {
+            "stats": StatsCollector(),
             "spotify": SpotifyCollector(),
             "weather": WeatherCollector(),
-            "image":   WebcamCollector(),
+            "image": WebcamCollector(),
         }
 
-        self._voice = VoiceHandler(on_ack=self._send_ack)
-        self._transport = SerialTransport(port=serial_port, baud=baud, on_event=self._on_serial_event)
-        self._last_push: dict = {t: 0.0 for t in MODE_TYPES}
+        # Voice handler
+        if voice is not None:
+            self._voice = voice
+        else:
+            # Import lazily to avoid pulling requests/ffmpeg/ALSA into
+            # unit tests.
+            from voice_handler import VoiceHandler
+
+            self._voice = VoiceHandler(on_ack=self._send_ack)
+
+        # Transport
+        self._transport = transport or SerialTransport(
+            port=serial_port, baud=baud, on_event=self._on_serial_event
+        )
+
+        self._last_push: dict[str, float] = {t: 0.0 for t in MODE_TYPES}
         self._last_heartbeat = 0.0
 
-        self._push_thread: threading.Thread = None
+        self._push_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
     # ── Public ───────────────────────────────────────────────────────────────
-
     def start(self):
         self._running = True
         self._transport.start()
 
-        self._push_thread = threading.Thread(
-            target=self._push_loop, daemon=True, name="push-loop"
-        )
-        self._push_thread.start()
+        if self._enable_periodic_push:
+            self._push_thread = threading.Thread(
+                target=self._push_loop, daemon=True, name="push-loop"
+            )
+            self._push_thread.start()
 
-        logger.info("TTGO Bridge started. Mode: %s", MODE_TYPES[self._current_mode])
+        if self._enable_heartbeat:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop, daemon=True, name="heartbeat-loop"
+            )
+            self._heartbeat_thread.start()
+
+        logger.info(
+            "TTGO Bridge started. Mode: %s",
+            MODE_TYPES[self._current_mode],
+        )
 
     def wait(self):
         """Block until stop() is called."""
@@ -96,12 +140,14 @@ class TTGOBridge:
 
     def stop(self):
         self._running = False
-        self._transport.stop()
+        try:
+            self._transport.stop()
+        except Exception:
+            pass
         self._stop_event.set()
         logger.info("TTGO Bridge stopped")
 
     # ── Serial event handler (called from read thread) ───────────────────────
-
     def _on_serial_event(self, obj: dict):
         event = obj.get("event", "")
         logger.debug("Serial event: %s", event)
@@ -109,34 +155,41 @@ class TTGOBridge:
         if event == "device_ready":
             logger.info("TTGO device ready — pushing current mode data")
             self._push_now(MODE_TYPES[self._current_mode])
+            return
 
-        elif event == "btn1_press":
-            # TTGO already changed mode; we just need to know which one.
-            # Firmware sends mode_changed with the new index.
-            pass
-
-        elif event == "mode_changed":
+        if event == "mode_changed":
             new_idx = obj.get("mode", 0)
             if 0 <= new_idx < len(MODE_TYPES):
                 old_mode = MODE_TYPES[self._current_mode]
                 self._current_mode = new_idx
                 new_mode = MODE_TYPES[new_idx]
                 logger.info("Mode changed: %s → %s", old_mode, new_mode)
+
                 # If TTGO enters image mode, capture/send exactly once.
                 if new_mode == "image":
-                    self._collectors["image"].invalidate_cache()
+                    img_col = self._collectors.get("image")
+                    if img_col is not None and hasattr(img_col, "invalidate_cache"):
+                        img_col.invalidate_cache()
                     self._push_now("image")
                 else:
-                    # Push data for non-image modes immediately.
                     self._push_now(new_mode)
+            return
 
-        elif event == "ptt_start":
+        if event == "ptt_start":
             logger.info("PTT start")
-            self._voice.on_ptt_start()
+            try:
+                self._voice.on_ptt_start()
+            except Exception as e:
+                logger.warning("voice.on_ptt_start failed: %s", e)
+            return
 
-        elif event == "ptt_stop":
+        if event == "ptt_stop":
             logger.info("PTT stop")
-            self._voice.on_ptt_stop()
+            try:
+                self._voice.on_ptt_stop()
+            except Exception as e:
+                logger.warning("voice.on_ptt_stop failed: %s", e)
+            return
 
     def set_mode(self, mode_idx: int):
         """Remotely switch display mode via serial command."""
@@ -145,32 +198,35 @@ class TTGOBridge:
             self._current_mode = mode_idx
             new_mode = MODE_TYPES[mode_idx]
             logger.info("Remote mode switch: %s → %s", old_mode, new_mode)
+
             self._transport.send({"type": "set_mode", "mode": mode_idx})
+
+            # Let firmware process set_mode / mode_changed
+            time.sleep(self._mode_switch_delay)
+
+            # For UX: push immediately when switching locally via set_mode.
             if new_mode == "image":
-                self._collectors["image"].invalidate_cache()
-                time.sleep(0.3)  # let firmware process set_mode
+                img_col = self._collectors.get("image")
+                if img_col is not None and hasattr(img_col, "invalidate_cache"):
+                    img_col.invalidate_cache()
                 self._push_now("image")
             else:
-                time.sleep(0.3)  # let firmware process set_mode
                 self._push_now(new_mode)
+
             return
 
         logger.warning("set_mode: invalid mode_idx=%s", mode_idx)
 
-
-    # ── Data push loop ────────────────────────────────────────────────────────
-
+    # ── Data push loop ───────────────────────────────────────────────────────
     def _push_loop(self):
         while self._running:
             now = time.monotonic()
 
             # Push ALL lightweight modes on their own intervals so the
             # firmware always has fresh data regardless of which mode the
-            # TTGO is displaying.  (Button events are unreliable over
-            # serial, so the bridge can't trust _current_mode.)
+            # TTGO is displaying. (Button events are unreliable over serial, so
+            # the bridge can't trust _current_mode.)
             for mode in MODE_TYPES:
-                # Image payload is disabled in periodic push loop.
-
                 interval = PUSH_INTERVAL.get(mode, 5)
                 if now - self._last_push[mode] >= interval:
                     self._push_now(mode)
@@ -191,8 +247,35 @@ class TTGOBridge:
         except Exception as e:
             logger.warning("Push error for mode %s: %s", mode, e)
 
+    def _heartbeat_loop(self):
+        # Send immediately after start (so the first freshness window is covered).
+        while self._running:
+            try:
+                now = time.time()
+                # Small guard to avoid over-sending if clock jumps.
+                if now - self._last_heartbeat >= self._heartbeat_interval:
+                    self._transport.send({"type": "heartbeat", "ts": now})
+                    self._last_heartbeat = now
+            except Exception as e:
+                logger.debug("Heartbeat send failed: %s", e)
+
+            # Sleep a bit less than the interval so we don't drift too much.
+            time.sleep(min(1.0, max(0.1, self._heartbeat_interval / 5.0)))
+
     def _send_ack(self, text: str):
         self._transport.send({"type": "ack", "text": text})
+
+
+def _load_env_file(path: Path):
+    if not path.exists():
+        return
+
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        os.environ.setdefault(k.strip(), v.strip())
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -200,6 +283,11 @@ class TTGOBridge:
 def main():
     parser = argparse.ArgumentParser(description="TTGO T-Display Bridge")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Optional env file to load before startup (dev/testing).",
+    )
     args = parser.parse_args()
 
     level = logging.DEBUG if args.debug else logging.INFO
@@ -209,14 +297,13 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    # Load .env before anything else
-    env_file = Path.home() / ".hermes" / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
+    # Load env before anything else.
+    # Under systemd, secrets are already injected via EnvironmentFile=...,
+    # so this is mainly for local/dev usage.
+    if args.env_file:
+        _load_env_file(Path(args.env_file).expanduser())
+    else:
+        _load_env_file(Path.home() / ".hermes" / ".env")
 
     bridge = TTGOBridge()
 
@@ -224,7 +311,7 @@ def main():
         logger.info("Signal %s received — shutting down", sig)
         bridge.stop()
 
-    signal.signal(signal.SIGINT,  _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
     bridge.start()

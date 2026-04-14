@@ -16,7 +16,7 @@ Quick start (Raspberry Pi)
 - Configure environment variables (see .env.example)
 - Run bridge:
     cd bridge
-    python3 ttgo_bridge.py --debug --env-file ../.env
+    python3 ttgo_bridge.py --debug --env-file ../.env (optional; mainly for local/dev)
 
 Quick start (ESP32 firmware)
 - Install PlatformIO
