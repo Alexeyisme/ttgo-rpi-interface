@@ -2,7 +2,10 @@
 #define MODE_IMAGE_H
 
 #include "mode_base.h"
-// Include JPEGDEC without SD/FS.h — we only use openRAM() from RAM buffer.
+// JPEGDEC.h references Arduino's File type in its API.
+// On ESP32 we only use openRAM(), so forward-declare File to satisfy the header
+// without pulling in full FS implementations.
+class File;
 #include <JPEGDEC.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
