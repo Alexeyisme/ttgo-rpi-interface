@@ -61,11 +61,30 @@ static const int8_t _b64Table[256] = {
 };
 
 static size_t _b64Decode(const char* src, size_t srcLen, uint8_t* dst, size_t dstMax) {
+    // Strict-ish base64 decode:
+    // - stops at '=' padding
+    // - ignores whitespace
+    // - fails fast on any other invalid character (returns 0)
     size_t out = 0;
     int val = 0, bits = -8;
     for (size_t i = 0; i < srcLen && out < dstMax; i++) {
-        int c = _b64Table[(uint8_t)src[i]];
-        if (c == -1) continue;
+        unsigned char ch = (unsigned char)src[i];
+
+        // Whitespace is tolerated
+        if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+            continue;
+        }
+        // Padding: stop decoding further
+        if (ch == '=') {
+            break;
+        }
+
+        int c = _b64Table[ch];
+        if (c == -1) {
+            // Invalid base64 char (likely UART corruption/truncation)
+            return 0;
+        }
+
         val = (val << 6) + c;
         bits += 6;
         if (bits >= 0) {
@@ -76,7 +95,7 @@ static size_t _b64Decode(const char* src, size_t srcLen, uint8_t* dst, size_t ds
     return out;
 }
 
-#define IMG_DECODE_BUF  14336   // 14 KB decode buffer
+#define IMG_DECODE_BUF  22000   // 22 KB decode buffer (more headroom for base64 truncation)
 
 class ModeImage : public IDisplayMode {
 public:
@@ -142,8 +161,13 @@ public:
             jpeg.decode(0, 0, 0);
             jpeg.close();
         } else {
+            char line2[48];
+            // Show sizes to detect truncation / bad base64 payload.
+            // (We already checked SOI bytes earlier.)
+            snprintf(line2, sizeof(line2), "src:%lu jpeg:%lu", (unsigned long)srcLen, (unsigned long)jpegLen);
             tft.fillScreen(TFT_BLACK);
-            drawCentered(tft, "JPEG open fail", SCREEN_H / 2, COL_RED);
+            drawCentered(tft, "JPEG open fail", SCREEN_H / 2 - 8, COL_RED);
+            drawCentered(tft, line2, SCREEN_H / 2 + 12, COL_RED);
         }
         free(jpegBuf);
         _imgTft = nullptr;

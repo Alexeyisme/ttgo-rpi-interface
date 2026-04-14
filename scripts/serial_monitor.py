@@ -21,7 +21,7 @@ import time
 from datetime import datetime
 
 SERIAL_PORT = "/dev/ttyACM0"
-SERIAL_BAUD = 2000000
+SERIAL_BAUD = 460800
 
 # ── ANSI colors ──────────────────────────────────────────────────────────────
 

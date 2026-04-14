@@ -41,7 +41,11 @@ PUSH_INTERVAL = {
     "stats":   5,
     "spotify": 5,
     "weather": 10,
-    "image":   30,   # heavy payload, refresh less often
+
+    # Image payload is heavy and we ONLY want to capture/send it when
+    # TTGO enters image mode (see _on_serial_event -> mode_changed).
+    # So we keep the entry here for completeness but periodic pushing is disabled below.
+    "image":   10**9,
 }
 
 # Heartbeat interval — send a tiny keepalive when the mode's push interval
@@ -53,7 +57,7 @@ MODE_TYPES = ["stats", "spotify", "weather", "image"]
 
 
 class TTGOBridge:
-    def __init__(self, serial_port: str = "/dev/ttyACM0", baud: int = 2000000):
+    def __init__(self, serial_port: str = "/dev/ttyACM0", baud: int = 460800):
         self._current_mode = 0
         self._running      = False
 
@@ -118,11 +122,13 @@ class TTGOBridge:
                 self._current_mode = new_idx
                 new_mode = MODE_TYPES[new_idx]
                 logger.info("Mode changed: %s → %s", old_mode, new_mode)
-                # Invalidate webcam cache so it captures fresh on entry
+                # If TTGO enters image mode, capture/send exactly once.
                 if new_mode == "image":
                     self._collectors["image"].invalidate_cache()
-                # Push data for new mode immediately
-                self._push_now(new_mode)
+                    self._push_now("image")
+                else:
+                    # Push data for non-image modes immediately.
+                    self._push_now(new_mode)
 
         elif event == "ptt_start":
             logger.info("PTT start")
@@ -142,8 +148,11 @@ class TTGOBridge:
             self._transport.send({"type": "set_mode", "mode": mode_idx})
             if new_mode == "image":
                 self._collectors["image"].invalidate_cache()
-            time.sleep(0.3)  # let firmware process set_mode
-            self._push_now(new_mode)
+                time.sleep(0.3)  # let firmware process set_mode
+                self._push_now("image")
+            else:
+                time.sleep(0.3)  # let firmware process set_mode
+                self._push_now(new_mode)
             return
 
         logger.warning("set_mode: invalid mode_idx=%s", mode_idx)
@@ -160,6 +169,8 @@ class TTGOBridge:
             # TTGO is displaying.  (Button events are unreliable over
             # serial, so the bridge can't trust _current_mode.)
             for mode in MODE_TYPES:
+                # Image payload is disabled in periodic push loop.
+
                 interval = PUSH_INTERVAL.get(mode, 5)
                 if now - self._last_push[mode] >= interval:
                     self._push_now(mode)

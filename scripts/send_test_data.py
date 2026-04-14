@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 SERIAL_PORT = "/dev/ttyACM0"
-SERIAL_BAUD = 2000000
+SERIAL_BAUD = 460800
 
 # ── Test data generators ──────────────────────────────────────────────────────
 
