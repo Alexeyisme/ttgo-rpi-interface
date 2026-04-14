@@ -1,0 +1,326 @@
+"""
+data_collectors.py — Data sources for each TTGO display mode.
+
+Each collector implements collect() -> dict, which returns a JSON-serializable
+dict ready to send over serial. All collectors are designed to fail gracefully:
+they catch exceptions and return the last known good data (or a sensible default).
+"""
+
+import base64
+import io
+import logging
+import os
+import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RPi System Stats
+# ─────────────────────────────────────────────────────────────────────────────
+class StatsCollector:
+    def collect(self) -> dict:
+        try:
+            import psutil
+
+            cpu     = psutil.cpu_percent(interval=0.5)
+            vm      = psutil.virtual_memory()
+            ram_free = vm.available / 1024 / 1024          # MB
+            ram_tot  = vm.total     / 1024 / 1024          # MB
+            disk    = psutil.disk_usage("/")
+            disk_gb = disk.free  / 1024 / 1024 / 1024      # GB
+
+            temp = 0.0
+            try:
+                # RPi thermal zone
+                raw = Path("/sys/class/thermal/thermal_zone0/temp").read_text().strip()
+                temp = int(raw) / 1000.0
+            except Exception:
+                try:
+                    temps = psutil.sensors_temperatures()
+                    if temps:
+                        first = next(iter(temps.values()))
+                        if first:
+                            temp = first[0].current
+                except Exception:
+                    pass
+
+            # Uptime + load (nice-to-have for the display)
+            uptime_sec = 0
+            try:
+                import psutil
+                boot = psutil.boot_time()
+                uptime_sec = int(time.time() - boot)
+            except Exception:
+                uptime_sec = 0
+
+            load1 = load5 = load15 = 0.0
+            try:
+                load1, load5, load15 = os.getloadavg()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+            return {
+                "type":      "stats",
+                "cpu":       round(cpu, 1),
+                "ram":       round(ram_free, 0),
+                "ram_total": round(ram_tot, 0),
+                "temp":      round(temp, 1),
+                "disk":      round(disk_gb, 1),
+                "uptime_sec": int(uptime_sec),
+                "load1":     float(load1),
+                "load5":     float(load5),
+                "load15":    float(load15),
+            }
+        except Exception as e:
+            logger.warning("StatsCollector error: %s", e)
+            return {"type": "stats", "cpu": 0, "ram": 0, "ram_total": 1000, "temp": 0, "disk": 0}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Spotify Now Playing
+# ─────────────────────────────────────────────────────────────────────────────
+class SpotifyCollector:
+    def __init__(self):
+        self._sp = None
+        self._last: dict = {
+            "type": "spotify", "track": "Nothing playing",
+            "artist": "", "playing": False, "progress_pct": 0,
+            "progress_sec": 0, "duration_sec": 0,
+        }
+
+    def _get_sp(self):
+        if self._sp is not None:
+            return self._sp
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyOAuth
+
+            env_file = Path.home() / ".hermes" / ".env"
+            if env_file.exists():
+                for line in env_file.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+
+            client_id     = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
+            client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
+            cache_path    = str(Path.home() / ".hermes" / ".spotify_cache")
+
+            if not client_id or not client_secret:
+                return None
+
+            self._sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri="http://localhost:8888/callback",
+                scope="user-read-playback-state",
+                cache_path=cache_path,
+                open_browser=False,
+            ))
+            return self._sp
+        except Exception as e:
+            logger.warning("Spotify init failed: %s", e)
+            return None
+
+    def collect(self) -> dict:
+        sp = self._get_sp()
+        if sp is None:
+            return self._last
+
+        try:
+            pb = sp.current_playback()
+            if pb is None or pb.get("item") is None:
+                self._last = {
+                    "type": "spotify", "track": "Nothing playing",
+                    "artist": "", "playing": False, "progress_pct": 0,
+                    "progress_sec": 0, "duration_sec": 0,
+                }
+                return self._last
+
+            item     = pb["item"]
+            track    = item.get("name", "Unknown")
+            artists  = ", ".join(a["name"] for a in item.get("artists", []))
+            playing  = pb.get("is_playing", False)
+            prog_ms  = pb.get("progress_ms") or 0
+            dur_ms   = item.get("duration_ms") or 1
+            prog_pct = int(prog_ms / dur_ms * 100)
+
+            self._last = {
+                "type":         "spotify",
+                "track":        track,
+                "artist":       artists,
+                "playing":      playing,
+                "progress_pct": prog_pct,
+                "progress_sec": prog_ms  // 1000,
+                "duration_sec": dur_ms   // 1000,
+            }
+            return self._last
+
+        except Exception as e:
+            logger.warning("Spotify collect error: %s", e)
+            # Return last known on transient error
+            self._sp = None   # force re-init next time
+            return self._last
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Weather — Home Assistant sensors
+# ─────────────────────────────────────────────────────────────────────────────
+class WeatherCollector:
+    # Sensor entity IDs to fetch from HA
+    SENSORS = {
+        "temp_out": "sensor.outdoor_temp",
+        "hum_out":  "sensor.outdoor_humidity",
+        "temp_in":  "sensor.living_room_temp",
+        "hum_in":   "sensor.living_room_humidity",
+        "aqi":      "sensor.living_room_aqi",
+    }
+
+    def __init__(self):
+        self._last = {"type": "weather"}
+
+    def collect(self) -> dict:
+        hass_url   = os.environ.get("HASS_URL",   "http://homeassistant.local:8123").rstrip("/")
+        hass_token = os.environ.get("HASS_TOKEN", "")
+        if not hass_token:
+            return self._last
+
+        try:
+            import requests
+            headers = {"Authorization": f"Bearer {hass_token}", "Content-Type": "application/json"}
+            data = {"type": "weather"}
+
+            for key, entity_id in self.SENSORS.items():
+                try:
+                    r = requests.get(f"{hass_url}/api/states/{entity_id}",
+                                     headers=headers, timeout=5)
+                    if r.status_code == 200:
+                        state = r.json().get("state", "unavailable")
+                        if state not in ("unavailable", "unknown"):
+                            data[key] = float(state) if "." in state else int(state)
+                except Exception:
+                    pass
+
+            if len(data) > 1:   # got at least one sensor
+                self._last = data
+            return self._last
+
+        except Exception as e:
+            logger.warning("WeatherCollector error: %s", e)
+            return self._last
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Webcam — JPEG snapshot from /dev/video0
+# ─────────────────────────────────────────────────────────────────────────────
+class WebcamCollector:
+    TARGET_W  = 135
+    TARGET_H  = 240
+    QUALITY   = 65    # JPEG quality 1-95
+    DEVICE    = "/dev/video0"
+    WARMUP_FRAMES = 10  # discard first N frames — C920 needs AE/AF to settle after open
+
+    def __init__(self):
+        self._last_b64: Optional[str] = None
+        self._last_capture = 0.0
+        self._cache_ttl    = 30.0   # re-capture at most every 30s on mode entry
+
+    def collect(self) -> Optional[dict]:
+        """Returns image dict, or None if capture failed."""
+        now = time.time()
+        if self._last_b64 and (now - self._last_capture) < self._cache_ttl:
+            return {"type": "image", "jpeg_b64": self._last_b64}
+
+        b64 = self._capture()
+        if b64 is None:
+            if self._last_b64:
+                return {"type": "image", "jpeg_b64": self._last_b64}
+            return None
+
+        self._last_b64     = b64
+        self._last_capture = now
+        return {"type": "image", "jpeg_b64": b64}
+
+    def invalidate_cache(self):
+        """Force a fresh capture next time (called on mode entry)."""
+        self._last_capture = 0.0
+
+    def _capture(self) -> Optional[str]:
+        """Capture one frame from /dev/video0, resize, JPEG-encode, base64.
+        Opens and releases the camera each time — do NOT keep it open, as
+        a persistent handle blocks re-open attempts from the same process.
+        """
+        try:
+            try:
+                import cv2
+                # Retry open — USB autosuspend can cause the first attempt to fail
+                cap = None
+                for attempt in range(3):
+                    cap = cv2.VideoCapture(self.DEVICE)
+                    if cap.isOpened():
+                        break
+                    cap.release()
+                    logger.debug("Camera open attempt %d failed, retrying...", attempt + 1)
+                    time.sleep(0.5)
+                if cap is None or not cap.isOpened():
+                    raise RuntimeError("cv2: could not open camera after retries")
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+                # Read warmup frames so C920 AE/AF can settle, then take the last good one.
+                frame = None
+                for _ in range(self.WARMUP_FRAMES):
+                    ok, f = cap.read()
+                    if ok and f is not None:
+                        frame = f   # always keep the latest frame
+                cap.release()
+
+                if frame is None:
+                    raise RuntimeError("cv2 capture failed after retry")
+
+                # Resize to fill 135×240 (portrait), crop center
+                fh, fw = frame.shape[:2]
+                scale  = max(self.TARGET_W / fw, self.TARGET_H / fh)
+                nw, nh = int(fw * scale), int(fh * scale)
+                frame  = cv2.resize(frame, (nw, nh))
+                cx, cy = (nw - self.TARGET_W) // 2, (nh - self.TARGET_H) // 2
+                frame  = frame[cy:cy + self.TARGET_H, cx:cx + self.TARGET_W]
+
+                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.QUALITY])
+                if not ok:
+                    raise RuntimeError("cv2 encode failed")
+
+                return base64.b64encode(buf.tobytes()).decode("ascii")
+
+            except ImportError:
+                pass
+
+            # Fallback: ffmpeg subprocess
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "v4l2",
+                    "-i", "/dev/video0",
+                    "-frames:v", "1",
+                    "-vf", f"scale={self.TARGET_W}:{self.TARGET_H}:force_original_aspect_ratio=increase,"
+                           f"crop={self.TARGET_W}:{self.TARGET_H}",
+                    "-q:v", str(max(1, int((100 - self.QUALITY) / 10))),
+                    "-f", "image2", "pipe:1",
+                ],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode != 0 or not result.stdout:
+                logger.warning("ffmpeg capture failed: %s", result.stderr[:200])
+                return None
+
+            return base64.b64encode(result.stdout).decode("ascii")
+
+        except Exception as e:
+            logger.warning("WebcamCollector error: %s", e)
+            return None

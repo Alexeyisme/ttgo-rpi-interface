@@ -1,0 +1,11 @@
+.pio/
+firmware/*.bak
+bridge/__pycache__/
+bridge/*.pyc
+tests/__pycache__/
+scripts/__pycache__/
+*.pyc
+__pycache__/
+.env
+*.env
+.DS_Store

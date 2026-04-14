@@ -1,0 +1,37 @@
+[Unit]
+Description=TTGO T-Display Hermes Satellite Bridge
+After=network.target sound.target
+
+# Restart if the serial device disappears and comes back
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# Install location recommendation:
+#   /opt/ttgo-display
+#   /opt/ttgo-display/bridge
+#
+# Adjust User/Group to match your system.
+User=pi
+Group=dialout
+WorkingDirectory=/opt/ttgo-display/bridge
+
+# Use a virtualenv python if you prefer; update path accordingly.
+ExecStart=/usr/bin/python3 /opt/ttgo-display/bridge/ttgo_bridge.py
+Restart=on-failure
+RestartSec=5
+
+# Environment file with your secrets (do not commit this file).
+EnvironmentFile=/etc/ttgo-display/ttgo-bridge.env
+
+# Give it access to the serial port and audio devices
+SupplementaryGroups=dialout audio video
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ttgo-bridge
+
+[Install]
+WantedBy=multi-user.target
