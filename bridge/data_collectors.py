@@ -222,9 +222,18 @@ class WeatherCollector:
 class WebcamCollector:
     TARGET_W  = 135
     TARGET_H  = 240
-    QUALITY   = 65    # JPEG quality 1-95
+    QUALITY   = 50    # JPEG quality 1-95 (lower reduces ringing/artifacts)
     DEVICE    = "/dev/video0"
     WARMUP_FRAMES = 10  # discard first N frames — C920 needs AE/AF to settle after open
+
+    # Firmware currently has tight RAM/serial limits:
+    #  - SerialProtocol input buffer: 16KB line (SP_BUF_SIZE)
+    #  - Image decode heap buffer: 14KB (IMG_DECODE_BUF)
+    #
+    # To make sure images reliably decode, we cap JPEG payload size so
+    # the full JSON line + base64 fits and the JPEG is not truncated.
+    MAX_JPEG_BYTES = 11000
+    MIN_QUALITY = 10
 
     def __init__(self):
         self._last_b64: Optional[str] = None
@@ -240,11 +249,21 @@ class WebcamCollector:
         b64 = self._capture()
         if b64 is None:
             if self._last_b64:
+                logger.info("WebcamCollector: capture failed; reusing cached image")
                 return {"type": "image", "jpeg_b64": self._last_b64}
+            logger.warning("WebcamCollector: capture failed; no cached image")
             return None
 
         self._last_b64     = b64
         self._last_capture = now
+
+        # Helpful for debugging truncation/serial size limits.
+        try:
+            jpeg_bytes_len = int(len(b64) * 3 / 4)
+        except Exception:
+            jpeg_bytes_len = -1
+        logger.info("WebcamCollector: captured image payload ~%d bytes (b64 chars=%d)", jpeg_bytes_len, len(b64))
+
         return {"type": "image", "jpeg_b64": b64}
 
     def invalidate_cache(self):
@@ -293,28 +312,90 @@ class WebcamCollector:
                 cx, cy = (nw - self.TARGET_W) // 2, (nh - self.TARGET_H) // 2
                 frame  = frame[cy:cy + self.TARGET_H, cx:cx + self.TARGET_W]
 
-                ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.QUALITY])
-                if not ok:
-                    raise RuntimeError("cv2 encode failed")
+                # Encode with quality backoff so JPEG fits the TTGO serial + RAM limits.
+                # (If JPEG is too large, base64 line gets truncated in SerialProtocol and/or
+                # the decoded JPEG buffer on the ESP32 gets truncated.)
+                q = int(self.QUALITY)
+                for _try in range(6):
+                    ok, buf = cv2.imencode(
+                        ".jpg",
+                        frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, max(self.MIN_QUALITY, q)],
+                    )
+                    if not ok:
+                        raise RuntimeError("cv2 encode failed")
 
-                return base64.b64encode(buf.tobytes()).decode("ascii")
+                    jpeg_bytes = buf.tobytes()
+                    if len(jpeg_bytes) <= self.MAX_JPEG_BYTES:
+                        return base64.b64encode(jpeg_bytes).decode("ascii")
+
+                    # Too big — lower quality and try again.
+                    q = q - 10
+                    time.sleep(0.05)
+
+                # If still too large, send the smallest we got (but log a warning).
+                logger.warning(
+                    "JPEG still too large for TTGO limits (%d bytes > %d); sending truncated-safe smallest attempt",
+                    len(jpeg_bytes), self.MAX_JPEG_BYTES,
+                )
+                return base64.b64encode(jpeg_bytes[: self.MAX_JPEG_BYTES]).decode("ascii")
+
 
             except ImportError:
                 pass
 
             # Fallback: ffmpeg subprocess
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-f", "v4l2",
-                    "-i", "/dev/video0",
-                    "-frames:v", "1",
-                    "-vf", f"scale={self.TARGET_W}:{self.TARGET_H}:force_original_aspect_ratio=increase,"
-                           f"crop={self.TARGET_W}:{self.TARGET_H}",
-                    "-q:v", str(max(1, int((100 - self.QUALITY) / 10))),
-                    "-f", "image2", "pipe:1",
-                ],
-                capture_output=True, timeout=5,
-            )
+            # ffmpeg fallback: try to keep JPEG payload under TTGO limits.
+            # We'll start from requested quality and (rarely) back off if too large.
+            # Note: ffmpeg -q:v is a quality scale (lower is better/less compression).
+            q = max(1, int((100 - self.QUALITY) / 10))
+            last = None
+            for _try in range(6):
+                result = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-f",
+                        "v4l2",
+                        "-i",
+                        "/dev/video0",
+                        "-frames:v",
+                        "1",
+                        "-vf",
+                        f"scale={self.TARGET_W}:{self.TARGET_H}:force_original_aspect_ratio=increase,"
+                        f"crop={self.TARGET_W}:{self.TARGET_H}",
+                        "-q:v",
+                        str(q),
+                        "-f",
+                        "image2",
+                        "pipe:1",
+                    ],
+                    capture_output=True,
+                    timeout=5,
+                )
+                last = result
+                if result.returncode != 0 or not result.stdout:
+                    break
+
+                jpeg_bytes = result.stdout
+                if len(jpeg_bytes) <= self.MAX_JPEG_BYTES:
+                    return base64.b64encode(jpeg_bytes).decode("ascii")
+
+                # Too big — make JPEG more compressed (increase q)
+                q += 3
+                time.sleep(0.05)
+
+            # If fallback still too large, send truncated-safe bytes.
+            if last and last.returncode == 0 and last.stdout:
+                jpeg_bytes = last.stdout
+                if len(jpeg_bytes) > self.MAX_JPEG_BYTES:
+                    logger.warning(
+                        "ffmpeg JPEG too large for TTGO limits (%d bytes > %d); truncating",
+                        len(jpeg_bytes),
+                        self.MAX_JPEG_BYTES,
+                    )
+                    jpeg_bytes = jpeg_bytes[: self.MAX_JPEG_BYTES]
+                return base64.b64encode(jpeg_bytes).decode("ascii")
             if result.returncode != 0 or not result.stdout:
                 logger.warning("ffmpeg capture failed: %s", result.stderr[:200])
                 return None

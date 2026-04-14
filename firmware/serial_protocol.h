@@ -22,6 +22,14 @@
 
 #define SP_BUF_SIZE 16384   // 16 KB — enough for base64 image chunks
 
+// ArduinoJson document capacity for incoming packets.
+// Image packets can include a ~7-10KB base64 string; without enough
+// capacity deserializeJson() will fail and the TTGO will never receive
+// any `type:"image"` data.
+#ifndef SERIAL_JSON_DOC_SIZE
+#define SERIAL_JSON_DOC_SIZE 25000
+#endif
+
 class SerialProtocol {
 public:
     SerialProtocol() : _bufPos(0) {}
@@ -75,7 +83,8 @@ public:
 private:
     char _buf[SP_BUF_SIZE];
     int  _bufPos;
-    JsonDocument _doc;
+    // Sized document to handle image packets.
+    StaticJsonDocument<SERIAL_JSON_DOC_SIZE> _doc;
 };
 
 #endif // SERIAL_PROTOCOL_H
