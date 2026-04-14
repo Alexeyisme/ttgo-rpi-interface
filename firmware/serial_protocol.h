@@ -35,7 +35,7 @@ public:
     SerialProtocol() : _bufPos(0) {}
 
     void begin() {
-        Serial.begin(115200);
+        Serial.begin(SERIAL_BAUD_RATE);
         _bufPos = 0;
     }
 

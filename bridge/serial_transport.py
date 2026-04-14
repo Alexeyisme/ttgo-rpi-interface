@@ -18,7 +18,7 @@ import serial
 logger = logging.getLogger(__name__)
 
 SERIAL_PORT    = "/dev/ttyACM0"
-SERIAL_BAUD    = 115200
+SERIAL_BAUD    = 2000000
 RECONNECT_WAIT = 3.0   # seconds between reconnect attempts
 
 

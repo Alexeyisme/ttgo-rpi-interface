@@ -2,7 +2,7 @@
 #define CONFIG_H
 
 // ── Serial ────────────────────────────────────────────────────────────────────
-#define SERIAL_BAUD_RATE 115200
+#define SERIAL_BAUD_RATE 2000000
 
 // ── TFT ───────────────────────────────────────────────────────────────────────
 #define TFT_ROTATION    0       // Portrait: 135 wide x 240 tall
