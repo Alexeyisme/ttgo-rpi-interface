@@ -1,3 +1,36 @@
+# TTGO Transport Protocol
+
+## Primary Transport: WiFi WebSocket
+
+The TTGO ESP32 connects to home WiFi and maintains a persistent WebSocket
+connection to the RPi bridge server.
+
+Connection: ws://homunculus.local:8765 (TTGO is WS client, RPi bridge is WS server)
+
+Each WS text frame = one JSON object. Same JSON schema as the serial protocol below.
+No newline framing needed (each frame is a complete message).
+
+Firmware: firmware/ws_transport.h
+  - WiFi credentials: firmware/wifi_config.h (gitignored, see wifi_config.h.example)
+  - WS host: WS_HOST macro (default: homunculus.local)
+  - WS port: WS_PORT macro (default: 8765)
+  - Auto-reconnect: 3s interval
+  - Heartbeat: ping every 15s
+
+Bridge: bridge/ws_transport.py
+  - WS server on 0.0.0.0:8765 (configurable via WS_PORT env var)
+  - Accepts exactly one TTGO client at a time
+  - Reconnects gracefully when TTGO drops
+
+Usage:
+  python3 ttgo_bridge.py                   # default: WebSocket
+  python3 ttgo_bridge.py --transport ws    # explicit WebSocket
+  python3 ttgo_bridge.py --transport serial # USB serial fallback
+
+---
+
+## Legacy Transport: USB Serial (fallback)
+
 Serial protocol (newline-delimited JSON)
 
 Transport
