@@ -1,5 +1,6 @@
 .pio/
 firmware/*.bak
+firmware/wifi_config.h
 bridge/__pycache__/
 bridge/*.pyc
 tests/__pycache__/

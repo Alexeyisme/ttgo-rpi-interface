@@ -1,0 +1,12 @@
+// firmware/wifi_config.h
+// WiFi credentials — DO NOT COMMIT. This file is gitignored.
+#ifndef WIFI_CONFIG_H
+#define WIFI_CONFIG_H
+
+#define WIFI_SSID     "YourSSID"
+#define WIFI_PASSWORD "YourPassword"
+#define WS_HOST       "homunculus.local"   // RPi hostname (mDNS)
+#define WS_PORT       8765
+#define WS_PATH       "/"
+
+#endif // WIFI_CONFIG_H
