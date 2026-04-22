@@ -26,8 +26,11 @@ RestartSec=5
 # Environment file with your secrets (do not commit this file).
 EnvironmentFile=/etc/ttgo-display/ttgo-bridge.env
 
-# Give it access to the serial port and audio devices
-SupplementaryGroups=dialout audio video
+# WebSocket port for WiFi transport
+Environment=WS_PORT=8765
+
+# Give it access to audio and video devices
+SupplementaryGroups=audio video
 
 StandardOutput=journal
 StandardError=journal
