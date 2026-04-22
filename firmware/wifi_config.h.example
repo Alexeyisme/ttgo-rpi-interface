@@ -9,4 +9,9 @@
 #define WS_PORT       8765
 #define WS_PATH       "/"
 
+// OTA update password (used by ArduinoOTA)
+#define OTA_PASSWORD  "ttgo-ota"
+// OTA hostname — shows up in pio upload and avahi/mDNS
+#define OTA_HOSTNAME  "ttgo-display"
+
 #endif // WIFI_CONFIG_H

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <ArduinoOTA.h>
 #include "config.h"
 #include "ws_transport.h"
 #include "display_manager.h"
@@ -49,6 +50,21 @@ void setup() {
     Serial.begin(115200);  // Debug output only (not data transport)
     Serial.printf("WiFi IP: %s\n", proto.ipAddress().c_str());
 
+    // ── OTA (Over-the-Air) update setup ──────────────────────────────────────
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA: start");
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("OTA: done — rebooting");
+    });
+    ArduinoOTA.onError([](ota_error_t err) {
+        Serial.printf("OTA error [%u]\n", err);
+    });
+    ArduinoOTA.begin();
+    Serial.println("OTA ready");
+
     // Button pins
     pinMode(BTN1_PIN, INPUT);          // GPIO35 — input only, no internal pull-up
     pinMode(BTN2_PIN, INPUT_PULLUP);   // GPIO0  — has internal pull-up
@@ -65,6 +81,9 @@ void setup() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
+    // ── OTA handler — must be called every loop ───────────────────────────────
+    ArduinoOTA.handle();
+
     // ── Serial protocol polling ───────────────────────────────────────────────
     if (proto.poll()) {
         lastDataMs = millis();
