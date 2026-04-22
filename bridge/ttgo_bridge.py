@@ -34,6 +34,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from serial_transport import SerialTransport
+from ws_transport import WsTransport
 from data_collectors import StatsCollector, SpotifyCollector, WeatherCollector, WebcamCollector
 # NOTE: VoiceHandler (and its dependencies like requests/ffmpeg/ALSA)
 # are imported lazily so the bridge can be unit-tested without those
@@ -66,6 +67,7 @@ class TTGOBridge:
         self,
         serial_port: str = "/dev/ttyACM0",
         baud: int = 460800,
+        transport_type: str = "ws",
         collectors: Optional[dict[str, Any]] = None,
         voice: Any = None,
         transport: Optional[SerialTransport] = None,
@@ -101,9 +103,17 @@ class TTGOBridge:
             self._voice = VoiceHandler(on_ack=self._send_ack)
 
         # Transport
-        self._transport = transport or SerialTransport(
-            port=serial_port, baud=baud, on_event=self._on_serial_event
-        )
+        if transport is not None:
+            self._transport = transport
+        elif transport_type == "serial":
+            self._transport = SerialTransport(
+                port=serial_port, baud=baud, on_event=self._on_serial_event
+            )
+        else:  # default: websocket
+            ws_port = int(os.environ.get("WS_PORT", "8765"))
+            self._transport = WsTransport(
+                port=ws_port, on_event=self._on_serial_event
+            )
 
         self._last_push: dict[str, float] = {t: 0.0 for t in MODE_TYPES}
         self._last_heartbeat = 0.0
@@ -130,7 +140,8 @@ class TTGOBridge:
             self._heartbeat_thread.start()
 
         logger.info(
-            "TTGO Bridge started. Mode: %s",
+            "TTGO Bridge started. Transport: %s  Mode: %s",
+            type(self._transport).__name__,
             MODE_TYPES[self._current_mode],
         )
 
@@ -288,6 +299,12 @@ def main():
         default=None,
         help="Optional env file to load before startup (dev/testing).",
     )
+    parser.add_argument(
+        "--transport",
+        choices=["ws", "serial"],
+        default="ws",
+        help="Transport type: ws (WebSocket, default) or serial (USB fallback)",
+    )
     args = parser.parse_args()
 
     level = logging.DEBUG if args.debug else logging.INFO
@@ -305,7 +322,7 @@ def main():
     else:
         _load_env_file(Path.home() / ".hermes" / ".env")
 
-    bridge = TTGOBridge()
+    bridge = TTGOBridge(transport_type=args.transport)
 
     def _shutdown(sig, frame):
         logger.info("Signal %s received — shutting down", sig)

@@ -242,6 +242,7 @@ def bridge(ttgo: VirtualTTGO):
     b = TTGOBridge(
         serial_port=ttgo.port,
         baud=460800,
+        transport_type="serial",
         collectors=collectors,
         voice=voice,
         enable_periodic_push=False,
