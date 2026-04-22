@@ -20,7 +20,7 @@ import threading
 from typing import Callable, Optional
 
 import websockets
-from websockets.server import WebSocketServerProtocol
+from websockets.asyncio.server import ServerConnection
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class WsTransport:
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
-        self._ws_client: Optional[WebSocketServerProtocol] = None
+        self._ws_client: Optional[ServerConnection] = None
         self._stop_event: Optional[asyncio.Event] = None
 
     @property
@@ -90,7 +90,7 @@ class WsTransport:
             logger.info("WebSocket server listening on ws://%s:%d", self._host, self._port)
             await self._stop_event.wait()
 
-    async def _handle_client(self, ws: WebSocketServerProtocol):
+    async def _handle_client(self, ws: ServerConnection):
         """Handle one TTGO client connection."""
         remote = ws.remote_address
         logger.info("TTGO connected from %s", remote)
@@ -116,7 +116,7 @@ class WsTransport:
             self._ws_client = None
             logger.info("TTGO disconnected from %s", remote)
 
-    async def _sender_loop(self, ws: WebSocketServerProtocol):
+    async def _sender_loop(self, ws: ServerConnection):
         """Drain the send queue and forward messages to the WS client."""
         loop = asyncio.get_event_loop()
         while True:
