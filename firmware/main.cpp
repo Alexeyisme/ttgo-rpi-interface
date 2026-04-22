@@ -1,12 +1,12 @@
 #include <Arduino.h>
 #include "config.h"
-#include "serial_protocol.h"
+#include "ws_transport.h"
 #include "display_manager.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Globals
 // ─────────────────────────────────────────────────────────────────────────────
-SerialProtocol  proto;
+WsTransport  proto;
 DisplayManager  display;
 
 // Button state (ISR-safe via volatile)
@@ -45,6 +45,9 @@ void IRAM_ATTR onBtn2Up() {
 // ─────────────────────────────────────────────────────────────────────────────
 void setup() {
     proto.begin();
+
+    Serial.begin(115200);  // Debug output only (not data transport)
+    Serial.printf("WiFi IP: %s\n", proto.ipAddress().c_str());
 
     // Button pins
     pinMode(BTN1_PIN, INPUT);          // GPIO35 — input only, no internal pull-up
