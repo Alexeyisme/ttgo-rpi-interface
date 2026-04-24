@@ -6,10 +6,10 @@ This repository contains two parts:
 
 Hardware
 - TTGO T-Display (ESP32 + ST7789 135x240)
-- Connected to Raspberry Pi via USB serial (e.g. /dev/ttyACM0)
+- Connects to the bridge over WiFi WebSocket (USB serial only used for initial flash / fallback)
 - Buttons:
-  - BTN1 (top): cycles display modes
-  - BTN2 (bottom, hold): Push-to-Talk (PTT)
+  - GPIO35 (top): unused (physically damaged)
+  - GPIO0 (bottom): cycles display modes (active LOW)
 
 Quick start (Raspberry Pi)
 - Install Python deps:  python3 -m pip install -r bridge/requirements.txt

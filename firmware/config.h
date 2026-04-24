@@ -10,11 +10,13 @@
 #define SCREEN_H        240
 #define TFT_BL          4       // Backlight GPIO
 
-// ── Buttons ───────────────────────────────────────────────────────────────────
-#define BTN1_PIN        35      // Top button — cycle modes (active LOW)
-#define BTN2_PIN        0       // Bottom button — push-to-talk (active LOW)
+// ── Buttons ───────────────────────────────────────────────────────────
+// NOTE: Top button (GPIO35) is broken.
+// Mode cycling on GPIO0 (active LOW).
+// Voice/chat control now lives on a separate USB-tethered device (ttgo-chat-controller).
+#define BTN1_PIN        35      // Top button — BROKEN, unused
+#define MODE_BTN_PIN    0       // Mode cycle button (GPIO0, active LOW)
 #define BTN_DEBOUNCE_MS 200     // Debounce window
-#define BTN2_HOLD_MS    300     // ms hold before PTT activates
 
 // ── Display modes ─────────────────────────────────────────────────────────────
 #define MODE_STATS      0
@@ -25,7 +27,6 @@
 
 // ── Timeouts / intervals ──────────────────────────────────────────────────────
 #define STALE_DATA_MS       15000   // Show stale indicator after 15 s without data
-#define ANIMATION_TICK_MS   120     // PTT waveform redraw interval
 #define PROGRESS_BAR_H      8       // Height of progress bars in pixels
 
 // ── Colors (RGB565) ───────────────────────────────────────────────────────────
@@ -43,8 +44,6 @@
 #define COL_YELLOW      TFT_YELLOW
 #define COL_CYAN        TFT_CYAN
 #define COL_ORANGE      0xFD20
-#define COL_PTT_WAVE    0x07E0      // Green waveform
-#define COL_PTT_BG      TFT_BLACK
 #define COL_STALE       0x632C      // Dim orange-red for stale data
 
 #endif // CONFIG_H
