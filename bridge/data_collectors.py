@@ -23,11 +23,23 @@ logger = logging.getLogger(__name__)
 # RPi System Stats
 # ─────────────────────────────────────────────────────────────────────────────
 class StatsCollector:
+    def __init__(self):
+        # Prime psutil.cpu_percent so the first non-blocking call has a delta
+        # to work with (otherwise it returns 0.0).
+        try:
+            import psutil
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+
     def collect(self) -> dict:
         try:
             import psutil
 
-            cpu     = psutil.cpu_percent(interval=0.5)
+            # Non-blocking: returns CPU% since the previous call. The push
+            # loop runs every 500 ms so the delta window is always fresh.
+            # NEVER use interval=0.5 here — it would block the push loop.
+            cpu     = psutil.cpu_percent(interval=None)
             vm      = psutil.virtual_memory()
             ram_free = vm.available / 1024 / 1024          # MB
             ram_tot  = vm.total     / 1024 / 1024          # MB
@@ -82,91 +94,31 @@ class StatsCollector:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Spotify Now Playing
+# Spotify Now Playing — DISABLED
 # ─────────────────────────────────────────────────────────────────────────────
+# Spotify API polling was removed after Spotify rate-limited (banned) this
+# account for excessive request volume from duplicate bridge instances.
+# This stub keeps the "spotify" mode slot wired (so firmware protocol is
+# unchanged) but never makes any network call. Returns a static payload so
+# the display shows "Disabled" rather than stale data.
+#
+# DO NOT re-enable without: (1) a single canonical bridge instance, (2) a
+# long polling interval (≥60s), and (3) an on-device cache. See skill
+# `ttgo-chat-controller` → references/ttgo-satellite-bridge-spotify-rate-limit.md
 class SpotifyCollector:
     def __init__(self):
-        self._sp = None
-        self._last: dict = {
-            "type": "spotify", "track": "Nothing playing",
-            "artist": "", "playing": False, "progress_pct": 0,
-            "progress_sec": 0, "duration_sec": 0,
+        self._payload = {
+            "type":         "spotify",
+            "track":        "Spotify disabled",
+            "artist":       "",
+            "playing":      False,
+            "progress_pct": 0,
+            "progress_sec": 0,
+            "duration_sec": 0,
         }
 
-    def _get_sp(self):
-        if self._sp is not None:
-            return self._sp
-        try:
-            import spotipy
-            from spotipy.oauth2 import SpotifyOAuth
-
-            env_file = Path.home() / ".hermes" / ".env"
-            if env_file.exists():
-                for line in env_file.read_text().splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, _, v = line.partition("=")
-                        os.environ.setdefault(k.strip(), v.strip())
-
-            client_id     = os.environ.get("SPOTIFY_CLIENT_ID", "").strip()
-            client_secret = os.environ.get("SPOTIFY_CLIENT_SECRET", "").strip()
-            cache_path    = str(Path.home() / ".hermes" / ".spotify_cache")
-
-            if not client_id or not client_secret:
-                return None
-
-            self._sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-                client_id=client_id,
-                client_secret=client_secret,
-                redirect_uri="http://localhost:8888/callback",
-                scope="user-read-playback-state",
-                cache_path=cache_path,
-                open_browser=False,
-            ))
-            return self._sp
-        except Exception as e:
-            logger.warning("Spotify init failed: %s", e)
-            return None
-
     def collect(self) -> dict:
-        sp = self._get_sp()
-        if sp is None:
-            return self._last
-
-        try:
-            pb = sp.current_playback()
-            if pb is None or pb.get("item") is None:
-                self._last = {
-                    "type": "spotify", "track": "Nothing playing",
-                    "artist": "", "playing": False, "progress_pct": 0,
-                    "progress_sec": 0, "duration_sec": 0,
-                }
-                return self._last
-
-            item     = pb["item"]
-            track    = item.get("name", "Unknown")
-            artists  = ", ".join(a["name"] for a in item.get("artists", []))
-            playing  = pb.get("is_playing", False)
-            prog_ms  = pb.get("progress_ms") or 0
-            dur_ms   = item.get("duration_ms") or 1
-            prog_pct = int(prog_ms / dur_ms * 100)
-
-            self._last = {
-                "type":         "spotify",
-                "track":        track,
-                "artist":       artists,
-                "playing":      playing,
-                "progress_pct": prog_pct,
-                "progress_sec": prog_ms  // 1000,
-                "duration_sec": dur_ms   // 1000,
-            }
-            return self._last
-
-        except Exception as e:
-            logger.warning("Spotify collect error: %s", e)
-            # Return last known on transient error
-            self._sp = None   # force re-init next time
-            return self._last
+        return self._payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -196,15 +148,30 @@ class WeatherCollector:
             headers = {"Authorization": f"Bearer {hass_token}", "Content-Type": "application/json"}
             data = {"type": "weather"}
 
+            # Single /api/states call instead of one GET per sensor:
+            # - 1 HTTP round-trip instead of 5 (5× faster, 5× less chance
+            #   of blocking the push loop on a slow/unreachable HA).
+            # - 2.5s total timeout instead of up to 25s worst-case.
+            # - Returns ~all entities; filter client-side.
+            wanted = set(self.SENSORS.values())
+            r = requests.get(f"{hass_url}/api/states",
+                             headers=headers, timeout=2.5)
+            if r.status_code != 200:
+                return self._last
+
+            states_by_id = {}
+            for entry in r.json():
+                eid = entry.get("entity_id")
+                if eid in wanted:
+                    states_by_id[eid] = entry.get("state", "unavailable")
+
             for key, entity_id in self.SENSORS.items():
+                state = states_by_id.get(entity_id, "unavailable")
+                if state in ("unavailable", "unknown", None):
+                    continue
                 try:
-                    r = requests.get(f"{hass_url}/api/states/{entity_id}",
-                                     headers=headers, timeout=5)
-                    if r.status_code == 200:
-                        state = r.json().get("state", "unavailable")
-                        if state not in ("unavailable", "unknown"):
-                            data[key] = float(state) if "." in state else int(state)
-                except Exception:
+                    data[key] = float(state) if "." in str(state) else int(state)
+                except (TypeError, ValueError):
                     pass
 
             if len(data) > 1:   # got at least one sensor

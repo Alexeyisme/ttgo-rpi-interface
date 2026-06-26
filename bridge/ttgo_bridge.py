@@ -2,9 +2,11 @@
 """ttgo_bridge.py — Main daemon for TTGO T-Display satellite.
 
 Coordinates:
-  - SerialTransport: reads button/PTT events, sends display data
+  - Transport (WebSocket or USB serial): reads button events, sends display data
   - DataCollectors: StatsCollector, SpotifyCollector, WeatherCollector, WebcamCollector
-  - VoiceHandler: arecord + Whisper + Telegram dispatch on PTT
+
+Voice/chat control lives on a separate device (ttgo-chat-controller). This
+daemon only drives the satellite display.
 
 Mode order must match MODE_* constants in firmware config.h:
   0: stats
@@ -36,18 +38,15 @@ sys.path.insert(0, str(Path(__file__).parent))
 from serial_transport import SerialTransport
 from ws_transport import WsTransport
 from data_collectors import StatsCollector, SpotifyCollector, WeatherCollector, WebcamCollector
-# NOTE: VoiceHandler (and its dependencies like requests/ffmpeg/ALSA)
-# are imported lazily so the bridge can be unit-tested without those
-# external runtime deps.
 
 
 logger = logging.getLogger(__name__)
 
 # ── Push intervals per mode (seconds) ────────────────────────────────────────
 PUSH_INTERVAL = {
-    "stats": 5,
-    "spotify": 5,
-    "weather": 10,
+    "stats": 2,
+    "spotify": 2,
+    "weather": 5,
     # Image payload is heavy and we ONLY want to capture/send it when
     # TTGO enters image mode (see _on_serial_event -> mode_changed).
     # So periodic pushing is effectively disabled.
@@ -56,7 +55,7 @@ PUSH_INTERVAL = {
 
 # Heartbeat interval — send a tiny keepalive so firmware freshness watchdog
 # doesn't trip when a mode's payload is infrequent.
-HEARTBEAT_INTERVAL = 10  # seconds
+HEARTBEAT_INTERVAL = 5  # seconds
 
 # Mode index → type string (must match firmware config.h MODE_* order)
 MODE_TYPES = ["stats", "spotify", "weather", "image"]
@@ -69,7 +68,6 @@ class TTGOBridge:
         baud: int = 460800,
         transport_type: str = "ws",
         collectors: Optional[dict[str, Any]] = None,
-        voice: Any = None,
         transport: Optional[SerialTransport] = None,
         enable_periodic_push: bool = True,
         enable_heartbeat: bool = True,
@@ -91,16 +89,6 @@ class TTGOBridge:
             "weather": WeatherCollector(),
             "image": WebcamCollector(),
         }
-
-        # Voice handler
-        if voice is not None:
-            self._voice = voice
-        else:
-            # Import lazily to avoid pulling requests/ffmpeg/ALSA into
-            # unit tests.
-            from voice_handler import VoiceHandler
-
-            self._voice = VoiceHandler(on_ack=self._send_ack)
 
         # Transport
         if transport is not None:
@@ -160,6 +148,7 @@ class TTGOBridge:
 
     # ── Serial event handler (called from read thread) ───────────────────────
     def _on_serial_event(self, obj: dict):
+        logger.info("Serial event received: %s", obj)
         event = obj.get("event", "")
         logger.debug("Serial event: %s", event)
 
@@ -184,22 +173,6 @@ class TTGOBridge:
                     self._push_now("image")
                 else:
                     self._push_now(new_mode)
-            return
-
-        if event == "ptt_start":
-            logger.info("PTT start")
-            try:
-                self._voice.on_ptt_start()
-            except Exception as e:
-                logger.warning("voice.on_ptt_start failed: %s", e)
-            return
-
-        if event == "ptt_stop":
-            logger.info("PTT stop")
-            try:
-                self._voice.on_ptt_stop()
-            except Exception as e:
-                logger.warning("voice.on_ptt_stop failed: %s", e)
             return
 
     def set_mode(self, mode_idx: int):
@@ -233,6 +206,15 @@ class TTGOBridge:
         while self._running:
             now = time.monotonic()
 
+            # Skip all push work when TTGO is not connected. Previously the
+            # loop kept queueing packets into the WS transport while the
+            # device was absent, overflowing the 64-slot queue and producing
+            # constant "WS send queue full — dropping packet" warnings.
+            # Data will be pushed on device_ready when it reconnects.
+            if not getattr(self._transport, "connected", True):
+                time.sleep(0.5)
+                continue
+
             # Push ALL lightweight modes on their own intervals so the
             # firmware always has fresh data regardless of which mode the
             # TTGO is displaying. (Button events are unreliable over serial, so
@@ -242,16 +224,39 @@ class TTGOBridge:
                 if now - self._last_push[mode] >= interval:
                     self._push_now(mode)
 
-            time.sleep(1.0)
+            time.sleep(0.5)
 
     def _push_now(self, mode: str):
         collector = self._collectors.get(mode)
         if collector is None:
             return
 
+        # Webcam capture can take 1-3s (cv2 open + 10 warmup frames + encode).
+        # Running it on the push loop would freeze all other modes and delay
+        # heartbeats. Run it in a short-lived daemon thread instead.
+        if mode == "image":
+            # Stamp last_push NOW so the push loop doesn't re-fire while
+            # the capture thread is still running.
+            self._last_push[mode] = time.monotonic()
+
+            def _capture_and_send():
+                try:
+                    data = collector.collect()
+                    if data is not None and getattr(self._transport, "connected", True):
+                        logger.info("Pushing image data to TTGO (async)")
+                        self._transport.send(data)
+                except Exception as e:
+                    logger.warning("Push error for mode image (async): %s", e)
+
+            threading.Thread(
+                target=_capture_and_send, daemon=True, name="image-capture"
+            ).start()
+            return
+
         try:
             data = collector.collect()
             if data is not None:
+                logger.info("Pushing %s data to TTGO", mode)
                 self._transport.send(data)
                 self._last_push[mode] = time.monotonic()
                 logger.debug("Pushed %s data", mode)
@@ -272,9 +277,6 @@ class TTGOBridge:
 
             # Sleep a bit less than the interval so we don't drift too much.
             time.sleep(min(1.0, max(0.1, self._heartbeat_interval / 5.0)))
-
-    def _send_ack(self, text: str):
-        self._transport.send({"type": "ack", "text": text})
 
 
 def _load_env_file(path: Path):

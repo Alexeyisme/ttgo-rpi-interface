@@ -15,9 +15,8 @@
 //   {"type":"ack",     "text":"Playing jazz..."}
 //
 // TTGO → RPi (outgoing):
-//   {"event":"btn1_press"}
-//   {"event":"ptt_start"}
-//   {"event":"ptt_stop"}
+//   {"event":"device_ready"}
+//   {"event":"mode_changed","mode":N}
 // ─────────────────────────────────────────────────────────────────────────────
 
 #define SP_BUF_SIZE 32768   // 32 KB — more headroom for base64 image JSON line at higher baud
@@ -66,7 +65,7 @@ public:
 
     JsonDocument& getDoc() { return _doc; }
 
-    // Send a button/PTT event to the RPi.
+    // Send a button event to the RPi.
     void sendEvent(const char* eventName) {
         Serial.print("{\"event\":\"");
         Serial.print(eventName);

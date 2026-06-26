@@ -146,12 +146,6 @@ class VirtualTTGO:
 # ── Test doubles (no external deps) ─────────────────────────────────────────
 
 
-class DummyVoice:
-    def on_ptt_start(self):
-        return
-
-    def on_ptt_stop(self):
-        return
 
 
 class DummyStatsCollector:

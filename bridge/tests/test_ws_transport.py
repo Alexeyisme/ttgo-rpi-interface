@@ -54,11 +54,11 @@ def test_server_receives_event_from_client(transport):
     t, received = transport
     async def _send():
         async with websockets.connect(f"ws://127.0.0.1:{WS_TEST_PORT}") as ws:
-            await ws.send(json.dumps({"event": "ptt_start"}))
+            await ws.send(json.dumps({"event": "mode_changed", "mode": 2}))
             await asyncio.sleep(0.2)
     asyncio.run(_send())
     time.sleep(0.1)
-    assert any(m.get("event") == "ptt_start" for m in received)
+    assert any(m.get("event") == "mode_changed" for m in received)
 
 
 def test_send_delivers_message_to_client(transport):

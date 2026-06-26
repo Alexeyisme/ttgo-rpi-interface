@@ -9,10 +9,9 @@
 #include "mode_spotify.h"
 #include "mode_weather.h"
 #include "mode_image.h"
-#include "ptt_manager.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DisplayManager — owns the TFT, mode registry, and PTT overlay.
+// DisplayManager — owns the TFT and mode registry.
 // ─────────────────────────────────────────────────────────────────────────────
 class DisplayManager {
 public:
@@ -50,7 +49,7 @@ public:
         _modes[_modeIdx]->onEnter(_tft);
     }
 
-    // Called when a JSON packet arrives from serial.
+    // Called when a JSON packet arrives from the transport.
     void handleData(JsonObject obj) {
         const char* type = obj["type"] | "";
 
@@ -72,53 +71,32 @@ public:
         }
 
         // Route to the current mode if the type matches.
-        if (!_ptt.isActive() && strcmp(type, _modes[_modeIdx]->typeName()) == 0) {
+        if (strcmp(type, _modes[_modeIdx]->typeName()) == 0) {
             _modes[_modeIdx]->onData(obj, _tft);
         }
     }
 
-    // Button1 — cycle to next mode.
+    // Cycle to the next mode.
     void nextMode() {
-        if (_ptt.isActive()) return;
         _modeIdx = (_modeIdx + 1) % NUM_MODES;
         _tft.fillScreen(COL_BG);
         _modes[_modeIdx]->onEnter(_tft);
     }
 
-    // Button2 press — start PTT.
-    void pttStart() {
-        _ptt.start(_tft);
-    }
+    // Call every loop() — reserved for future animations.
+    void tick() {}
 
-    // Button2 release — stop PTT, restore mode screen.
-    void pttStop() {
-        _ptt.stop(_tft);
-        _tft.fillScreen(COL_BG);
-        _modes[_modeIdx]->onEnter(_tft);
-    }
-
-    // Call every loop() — handles PTT animation ticks.
-    void tick() {
-        if (_ptt.isActive()) {
-            _ptt.tick(_tft);
-        }
-    }
-
-    bool isPttActive() const { return _ptt.isActive(); }
-    int  currentMode() const { return _modeIdx; }
+    int currentMode() const { return _modeIdx; }
 
     void setConnected(bool c) {
         if (c == _connected) return;
         _connected = c;
-        if (!_ptt.isActive()) {
-            _modes[_modeIdx]->onConnected(c, _tft);
-        }
+        _modes[_modeIdx]->onConnected(c, _tft);
     }
 
 private:
     TFT_eSPI     _tft;
     IDisplayMode* _modes[NUM_MODES];
-    PTTManager   _ptt;
     int          _modeIdx;
     bool         _connected;
 

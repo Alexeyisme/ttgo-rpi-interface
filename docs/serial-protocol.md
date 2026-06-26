@@ -41,8 +41,6 @@ TTGO → Raspberry Pi (events)
 - {"event":"device_ready"}
 - {"event":"mode_changed","mode":<int>}   where mode indices are:
     0=stats, 1=spotify, 2=weather, 3=image
-- {"event":"ptt_start"}
-- {"event":"ptt_stop"}
 
 Raspberry Pi → TTGO (packets)
 - Stats:

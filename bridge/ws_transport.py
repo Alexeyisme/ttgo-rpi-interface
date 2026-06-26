@@ -17,6 +17,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Callable, Optional
 
 import websockets
@@ -86,8 +87,16 @@ class WsTransport:
             self._loop.close()
 
     async def _serve(self):
-        async with websockets.serve(self._handle_client, self._host, self._port):
-            logger.info("WebSocket server listening on ws://%s:%d", self._host, self._port)
+        async with websockets.serve(
+            self._handle_client, 
+            self._host, 
+            self._port,
+            ping_interval=None,  # Disable server-initiated pings (ESP32 sends its own)
+            ping_timeout=10,    # Still timeout if client disappears
+            close_timeout=1,
+            subprotocols=["arduino"]  # Accept the Arduino subprotocol
+        ):
+            logger.info("WebSocket server listening on ws://%s:%d (ping=disabled, timeout=10s, subprotocol=arduino)", self._host, self._port)
             await self._stop_event.wait()
 
     async def _handle_client(self, ws: ServerConnection):
@@ -96,6 +105,14 @@ class WsTransport:
         logger.info("TTGO connected from %s", remote)
         self._ws_client = ws
         self._connected = True
+        
+        # Send a test message to verify the channel works
+        try:
+            test_msg = {"type": "test", "message": "connection_ok", "ts": time.time()}
+            await ws.send(json.dumps(test_msg))
+            logger.info("Sent connection test message to TTGO")
+        except Exception as e:
+            logger.warning("Failed to send test message: %s", e)
 
         # Spawn sender task
         sender = asyncio.ensure_future(self._sender_loop(ws))
@@ -104,12 +121,13 @@ class WsTransport:
             async for message in ws:
                 try:
                     obj = json.loads(message)
+                    logger.info("Received WS message: %s", message)
                     if self._on_event and isinstance(obj, dict):
                         self._on_event(obj)
                 except json.JSONDecodeError:
                     logger.debug("WS bad JSON: %r", message)
-        except websockets.exceptions.ConnectionClosed:
-            pass
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.info("TTGO connection closed: %s", e)
         finally:
             sender.cancel()
             self._connected = False

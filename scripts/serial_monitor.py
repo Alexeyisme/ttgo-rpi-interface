@@ -42,8 +42,6 @@ class C:
 EVENT_COLORS = {
     "btn1_press":    C.CYAN,
     "mode_changed":  C.MAGENTA,
-    "ptt_start":     C.GREEN,
-    "ptt_stop":      C.RED,
     "device_ready":  C.YELLOW + C.BOLD,
 }
 
@@ -87,8 +85,6 @@ def main():
         epilog="""Events from TTGO:
   btn1_press    - Mode button pressed
   mode_changed  - Display mode switched (includes mode index)
-  ptt_start     - Push-to-talk button held down
-  ptt_stop      - Push-to-talk button released
   device_ready  - TTGO finished booting""",
     )
     parser.add_argument(
@@ -113,7 +109,7 @@ def main():
     )
     parser.add_argument(
         "--filter", type=str, default=None,
-        help="Only show events matching this string (e.g., 'ptt' or 'mode')",
+        help="Only show events matching this string (e.g., 'mode')",
     )
 
     args = parser.parse_args()

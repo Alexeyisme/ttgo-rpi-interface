@@ -41,7 +41,7 @@ public:
         }
 
         // Setup WS client
-        _ws.begin(WS_HOST, WS_PORT, WS_PATH);
+        _ws.begin(WS_HOST, WS_PORT, WS_PATH, WS_PROTOCOL);
         _ws.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
             this->_onWsEvent(type, payload, length);
         });
@@ -99,10 +99,12 @@ private:
         switch (type) {
             case WStype_CONNECTED:
                 _ready = true;
+                Serial.printf("[WS] Connected\n");
                 break;
 
             case WStype_DISCONNECTED:
                 _ready = false;
+                Serial.printf("[WS] Disconnected\n");
                 break;
 
             case WStype_TEXT: {

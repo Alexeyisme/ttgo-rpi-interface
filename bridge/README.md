@@ -1,10 +1,9 @@
 Bridge daemon (Raspberry Pi)
 
 This folder contains the Python daemon that:
-- Opens the serial device connected to the TTGO (default: /dev/ttyACM0)
-- Receives TTGO events (mode_changed, ptt_start/ptt_stop)
-- Periodically sends display updates as newline-delimited JSON
-- On PTT: records audio and sends it to Telegram (Hermes handles the message on its side)
+- Listens for a WebSocket connection from the TTGO (default: ws://0.0.0.0:8765); USB serial is available as a fallback via --transport serial
+- Receives TTGO events (device_ready, mode_changed)
+- Periodically sends display updates (stats, spotify, weather, webcam image) as JSON frames
 
 Quick start
 1) Create env file
